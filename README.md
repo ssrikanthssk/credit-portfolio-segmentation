@@ -40,27 +40,86 @@ credit-portfolio-segmentation/
 └── README.md
 ```
 
-## Data architecture and data folders (deep dive)
+## Data architecture
 
-### Data flow
+### Overview
+The project turns one raw 160 MB CSV into a set of small, dashboard-ready files in four layers. Each layer is produced by a notebook and can be rebuilt from the layer before it.
+
+```mermaid
+flowchart LR
+    A["RAW<br/>data/raw/<br/>1,347,681 rows x 15 cols"] -->|"Notebook 01<br/>clean + engineer"| B["PROCESSED<br/>data/processed/<br/>cleaned_loans.csv"]
+    B -->|"Notebook 02<br/>scale, PCA, K-Means"| C["MODELS<br/>models/<br/>scaler, PCA, K-Means"]
+    B -->|"Notebook 02"| D["CLUSTERED<br/>clustered_loans.csv<br/>X_pca_num.npy"]
+    D -->|"Notebook 03<br/>10k sample: t-SNE, UMAP,<br/>hierarchical, DBSCAN"| E["DASHBOARD DATA<br/>app/data/<br/>7 small CSV files"]
+    E --> F["Streamlit app<br/>app/app.py"]
 ```
-data/raw/loans_granting_model_dataset.csv        (1,347,681 x 15, about 160 MB)
-        |  notebook 01 + src/preprocessing.py  (clean, engineer features)
-        v
-data/processed/cleaned_loans.csv                 (1,347,681 x 17)
-        |  notebook 02  (scale 5 numeric features -> PCA -> K-Means)
-        v
-data/processed/clustered_loans.csv               (adds kmeans_cluster)
-data/processed/X_pca_num.npy                     (1,347,681 x 4 PCA scores)
-models/scaler_num.pkl, pca_num.pkl, kmeans_num.pkl
-        |  notebook 03  (10,000-row stratified sample: t-SNE, UMAP,
-        |                hierarchical, DBSCAN, anomalies)
-        v
-app/data/*.csv                                   (7 small files)
-        |
-        v
-app/app.py  ->  Streamlit dashboard
+
+### Folder map
 ```
+data/
+├── raw/          loans_granting_model_dataset.csv   source data, never edited     (not in Git)
+└── processed/    cleaned_loans.csv                  after cleaning (17 columns)    (not in Git)
+                  clustered_loans.csv                + kmeans_cluster (18 columns)  (not in Git)
+                  X_pca_num.npy                      4 PCA components per borrower  (not in Git)
+models/           scaler_num.pkl, pca_num.pkl,
+                  kmeans_num.pkl                     fitted objects (seed 42)       (not in Git)
+app/data/         7 summary CSV files                only data the dashboard reads  (in Git)
+reports/figures/  PNG plots from the notebooks                                      (in Git)
+```
+Raw and processed files are over GitHub's 100 MB limit, so they are rebuilt locally instead of committed.
+
+### Layer 1: raw data (`data/raw/`)
+Lending Club loans issued June 2007 to December 2018. Columns are grouped here by how the project uses them.
+
+| Role | Columns | How they are used |
+|---|---|---|
+| Clustering inputs | `revenue`, `dti_n`, `loan_amnt`, `fico_n`, `emp_length` | Cleaned, scaled and clustered. Income is log-transformed and employment length is converted to years. |
+| Describing the segments | `purpose`, `home_ownership_n`, `addr_state`, `issue_d` | Used after clustering for segment profiles, state analysis and year trends. |
+| Outcome | `Default` (0/1, 19.98% default rate) | Used only after clustering to compare default rates. |
+| Dropped | `id`, `title`, `desc`, `zip_code`, `experience_c` | Identifier, free text, partial zip codes, and a constant column. |
+
+### Layer 2: processed data (`data/processed/`)
+| File | Size | What changed |
+|---|---|---|
+| `cleaned_loans.csv` | 1,347,681 x 17 | Adds `issue_year`, `issue_month`, `emp_length_years`, `emp_length_missing`, `revenue_log`, `purpose_grouped` |
+| `X_pca_num.npy` | 1,347,681 x 4 | PCA scores of the five scaled numeric features, keeping 91.3% of the variance |
+| `clustered_loans.csv` | 1,347,681 x 18 | Adds the final `kmeans_cluster` label |
+
+### Layer 3: models (`models/`)
+`scaler_num.pkl` (StandardScaler), `pca_num.pkl` (4 components) and `kmeans_num.pkl` (k = 4), saved with `joblib` so new borrowers can be assigned to a segment without refitting.
+
+### Layer 4: dashboard data (`app/data/`)
+The deployed app reads only these files. They hold group-level summaries and one anonymous sample, and contain no loan IDs.
+
+| File | Used on dashboard page |
+|---|---|
+| `cluster_profile.csv` | Overview, Cluster profiles, Default analysis |
+| `cluster_purpose.csv`, `cluster_ownership.csv` | Cluster profiles |
+| `state_default.csv` | Default analysis (state chart) |
+| `year_cluster_default.csv` | Default analysis (trend chart) |
+| `algorithm_comparison.csv` | Algorithm comparison |
+| `dashboard_sample.csv` (10,000 rows) | Visualizations, Anomalies |
+
+### Data quality summary
+| Check | Finding | Action |
+|---|---|---|
+| Duplicate rows | None | None needed |
+| Missing values | None in numeric columns; `title` and `desc` have gaps (`desc` is 91% missing) | Both dropped |
+| Employment length | 78,188 loans have value "NI" (no information) | Flagged in `emp_length_missing`, filled with the median |
+| DTI outliers | 533 loans above 100, maximum 999 | Capped at the 99th percentile |
+| Income outliers | Maximum 10.9M, heavy right skew | Capped at the 99th percentile, then log-transformed |
+| Constant column | `experience_c` is 1 in all but 25 rows | Dropped |
+| Rare loan purposes | 14 purposes, several under 1% of loans | Grouped into 8 categories (`purpose_grouped`) |
+
+### Rebuild the data
+1. Put the raw CSV in `data/raw/`.
+2. Run notebook 01, then 02, then 03 in order.
+3. The last cell of notebook 03 writes the seven files into `app/data/`.
+
+### Data handling
+- `Default` and `id` never enter the clustering features.
+- Results describe groups of borrowers, not individuals.
+- The random seed is 42 everywhere (`src/config.py`), so results are reproducible.
 
 ### `data/raw/`
 Holds the original, unmodified dataset. It is never edited and never committed to GitHub (about 160 MB, over GitHub's 100 MB file limit).
