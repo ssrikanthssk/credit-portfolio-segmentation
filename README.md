@@ -17,8 +17,11 @@ Financial institutions deal with borrowers who have different incomes, credit sc
 ## Project structure
 ```
 credit-portfolio-segmentation/
+├── .streamlit/
+│   └── config.toml            # light theme for the dashboard
 ├── app/
 │   ├── app.py                 # Streamlit dashboard
+│   ├── requirements.txt       # light requirements for deployment
 │   └── data/                  # small summary files used by the dashboard
 ├── data/
 │   ├── raw/                   # raw CSV (not tracked)
@@ -28,13 +31,120 @@ credit-portfolio-segmentation/
 │   ├── 01_cleaning_eda.ipynb
 │   ├── 02_features_pca_kmeans.ipynb
 │   └── 03_dimred_hierarchical_dbscan.ipynb
+├── presentation/              # final presentation
 ├── reports/figures/           # saved plots
 ├── src/
 │   ├── config.py              # paths, random seed, constants
 │   └── preprocessing.py       # cleaning and feature functions
-├── requirements.txt
+├── requirements.txt           # pinned requirements for the full project
 └── README.md
 ```
+
+## Data architecture and data folders (deep dive)
+
+### Data flow
+```
+data/raw/loans_granting_model_dataset.csv        (1,347,681 x 15, about 160 MB)
+        |  notebook 01 + src/preprocessing.py  (clean, engineer features)
+        v
+data/processed/cleaned_loans.csv                 (1,347,681 x 17)
+        |  notebook 02  (scale 5 numeric features -> PCA -> K-Means)
+        v
+data/processed/clustered_loans.csv               (adds kmeans_cluster)
+data/processed/X_pca_num.npy                     (1,347,681 x 4 PCA scores)
+models/scaler_num.pkl, pca_num.pkl, kmeans_num.pkl
+        |  notebook 03  (10,000-row stratified sample: t-SNE, UMAP,
+        |                hierarchical, DBSCAN, anomalies)
+        v
+app/data/*.csv                                   (7 small files)
+        |
+        v
+app/app.py  ->  Streamlit dashboard
+```
+
+### `data/raw/`
+Holds the original, unmodified dataset. It is never edited and never committed to GitHub (about 160 MB, over GitHub's 100 MB file limit).
+
+| Column | Type | Used for | Notes |
+|---|---|---|---|
+| `id` | int | nothing | Loan identifier, dropped before clustering |
+| `issue_d` | text (`Dec-2015`) | `issue_year`, `issue_month` | Range 2007-06 to 2018-12 |
+| `revenue` | float | `revenue_log` | Annual income, heavily skewed, capped at the 99th percentile |
+| `dti_n` | float | clustering | Debt-to-income ratio, capped at the 99th percentile (max in raw data is 999) |
+| `loan_amnt` | int | clustering | Loan amount, 0 to 40,000 |
+| `fico_n` | float | clustering | FICO credit score, about 600 to 847 |
+| `experience_c` | int | dropped | Constant (1,347,656 rows are 1) |
+| `emp_length` | text | `emp_length_years` | "NI" (no information) is flagged and filled with the median |
+| `purpose` | text | profiling | 14 categories, rare ones grouped into `purpose_grouped` |
+| `home_ownership_n` | text | profiling | MORTGAGE, RENT, OWN, OTHER |
+| `addr_state` | text | geographic analysis | 51 states |
+| `zip_code` | text | dropped | Partial zip codes (for example `190xx`) |
+| `Default` | 0/1 | post-clustering only | Default rate 19.98%, never a clustering feature |
+| `title`, `desc` | text | dropped | Free text, `desc` is 91% missing |
+
+### `data/processed/`
+Created by the notebooks, so it can always be rebuilt. It is git-ignored.
+
+| File | Shape | Created by | Contents |
+|---|---|---|---|
+| `cleaned_loans.csv` | 1,347,681 x 17 | Notebook 01 | Raw columns kept plus `issue_year`, `issue_month`, `emp_length_years`, `emp_length_missing`, `revenue_log`, `purpose_grouped` |
+| `X_pca_num.npy` | 1,347,681 x 4 | Notebook 02 | PCA scores of the 5 scaled numeric features (91.3% of the variance) |
+| `clustered_loans.csv` | 1,347,681 x 18 | Notebook 02 | Cleaned data plus the final `kmeans_cluster` label |
+
+### Feature groups
+| Group | Columns | Role |
+|---|---|---|
+| Clustering features (5) | `revenue_log`, `dti_n`, `loan_amnt`, `fico_n`, `emp_length_years` | Scaled with `StandardScaler`, reduced with PCA, then clustered |
+| Descriptive features | `purpose`, `purpose_grouped`, `home_ownership_n`, `addr_state`, `issue_year` | Used after clustering to describe each segment, and for state and trend analysis |
+| Outcome | `Default` | Used after clustering to compare default rates |
+| Excluded | `id`, `title`, `desc`, `zip_code`, `experience_c` | Not used |
+
+### `models/`
+Saved with `joblib`, so the pipeline can be re-applied without refitting. Pickle files are git-ignored.
+
+| File | Object |
+|---|---|
+| `scaler_num.pkl` | `StandardScaler` fitted on the 5 numeric features |
+| `pca_num.pkl` | `PCA` with 4 components |
+| `kmeans_num.pkl` | `KMeans` with k = 4 (`random_state=42`) |
+
+Files without the `_num` suffix come from the first experiment (clustering with one-hot features) and are not used by the final model.
+
+### `app/data/`
+The only data the deployed dashboard reads. All 7 files are small and committed to the repository. None contains the loan `id`.
+
+| File | Contents |
+|---|---|
+| `cluster_profile.csv` | Size, average income, DTI, loan amount, FICO, years employed and default rate per segment (full data) |
+| `cluster_purpose.csv` | Share of each loan purpose in each segment |
+| `cluster_ownership.csv` | Share of each home ownership type in each segment |
+| `state_default.csv` | Default rate and number of loans per state |
+| `year_cluster_default.csv` | Default rate per issue year and segment |
+| `algorithm_comparison.csv` | Clusters, noise share and silhouette per algorithm |
+| `dashboard_sample.csv` | 10,000-row stratified sample with cluster labels (K-Means, hierarchical, DBSCAN) and PCA, t-SNE and UMAP coordinates |
+
+### `reports/figures/`
+PNG plots saved by the notebooks: feature distributions, correlation heatmap, default rate by purpose, state and cluster, PCA variance, K-Means elbow and silhouette plots, PCA, t-SNE and UMAP projections, the dendrogram, and the DBSCAN k-distance plot.
+
+### What is tracked in Git
+| Path | In GitHub? | Why |
+|---|---|---|
+| `data/raw/` | No | Too large (over 100 MB), available from the project brief |
+| `data/processed/` | No | Rebuilt by the notebooks, over 100 MB |
+| `models/*.pkl` | No | Rebuilt by notebook 02 |
+| `app/data/` | Yes | Small, needed to run the deployed dashboard |
+| `reports/figures/` | Yes | Small images used in the reports |
+
+### Rebuilding the data from scratch
+1. Place the raw CSV in `data/raw/`.
+2. Run notebook 01 to create `data/processed/cleaned_loans.csv`.
+3. Run notebook 02 to create the models, `X_pca_num.npy` and `clustered_loans.csv`.
+4. Run notebook 03. Its last cell writes the 7 dashboard files into `app/data/`.
+
+### Data handling and ethics
+- `Default` and `id` never enter the clustering features.
+- The dashboard files contain only group-level summaries and an anonymous 10,000-row sample, with no loan identifiers.
+- Segments describe groups of borrowers. They are not used to judge individual borrowers.
 
 ## Setup
 ```bash
@@ -44,7 +154,7 @@ python -m venv venv
 venv\Scripts\activate          # Windows
 pip install -r requirements.txt
 ```
-Place the raw CSV in `data/raw/`, then run the notebooks in order (01, 02, 03). The last cell of notebook 03 saves the files the dashboard needs into `app/data/`. Start the dashboard with:
+Place the raw CSV in `data/raw/`, then run the notebooks in order (01, 02, 03). The last cell of notebook 03 saves the files the dashboard needs into `app/data/`. Start the dashboard from the project root with:
 ```bash
 streamlit run app/app.py
 ```
@@ -90,7 +200,7 @@ streamlit run app/app.py
 - Historical default rates do not guarantee future outcomes.
 
 ## Reproducibility
-Random seed `42` is set in `src/config.py` and used by all models and samples.
+Random seed `42` is set in `src/config.py` and used by all models and samples. Library versions are pinned in the root `requirements.txt`.
 
 ## Tech stack
 Python, Pandas, NumPy, Matplotlib, Seaborn, scikit-learn, UMAP, SciPy, Plotly, Streamlit, Git and GitHub.
