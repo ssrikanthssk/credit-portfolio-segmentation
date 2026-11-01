@@ -1,0 +1,4 @@
+algorithm,clusters,noise_%,silhouette
+K-Means,4,0.0,0.2182
+Hierarchical (Ward),4,0.0,0.1755
+DBSCAN,1,1.7,
